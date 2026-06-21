@@ -31,11 +31,11 @@ export interface SearchResult {
  */
 export async function listNotes(
   config: AppConfig,
-  options: { folder?: string; limit?: number }
+  options: { folder?: string; limit?: number },
 ): Promise<NoteSummary[]> {
   const limit = Math.min(
     options.limit ?? config.limits.maxNotesPerListing,
-    config.limits.maxNotesPerListing
+    config.limits.maxNotesPerListing,
   );
 
   const folderFilter = options.folder
@@ -70,7 +70,11 @@ export async function listNotes(
         repeat with i from 1 to upperBound
           set theNote to item i of noteList
           set theTitle to name of theNote
-          set theFolder to name of container of theNote
+          try
+            set theFolder to name of container of theNote
+          on error
+            set theFolder to "Unknown"
+          end try
           set theDate to (modification date of theNote) as string
           set output to output & theTitle & "${FIELD_SEP}" & theFolder & "${FIELD_SEP}" & theDate & "${RECORD_SEP}"
         end repeat
@@ -90,7 +94,11 @@ export async function listNotes(
     const [title, folder, modifiedDate] = record.split(FIELD_SEP);
     if (!title) continue;
     if (!isNoteAllowed(title, folder ?? null, config)) continue;
-    results.push({ title, folder: folder ?? "Unknown", modifiedDate: modifiedDate ?? "" });
+    results.push({
+      title,
+      folder: folder ?? "Unknown",
+      modifiedDate: modifiedDate ?? "",
+    });
   }
 
   return results;
@@ -102,7 +110,7 @@ export async function listNotes(
  */
 export async function getNote(
   config: AppConfig,
-  titleQuery: string
+  titleQuery: string,
 ): Promise<NoteDetail | null> {
   const escapedQuery = escapeForAppleScript(titleQuery);
 
@@ -114,7 +122,11 @@ export async function getNote(
       end if
       set theNote to item 1 of matchingNotes
       set theTitle to name of theNote
-      set theFolder to name of container of theNote
+      try
+        set theFolder to name of container of theNote
+      on error
+        set theFolder to "Unknown"
+      end try
       set theDate to (modification date of theNote) as string
       set theBody to body of theNote
       return theTitle & "${FIELD_SEP}" & theFolder & "${FIELD_SEP}" & theDate & "${FIELD_SEP}" & theBody
@@ -132,7 +144,8 @@ export async function getNote(
   const maxLen = config.limits.maxNoteBodyLength;
   const truncated =
     maxLen > 0 && body.length > maxLen
-      ? body.slice(0, maxLen) + `\n\n[... truncated, note body exceeds ${maxLen} characters ...]`
+      ? body.slice(0, maxLen) +
+        `\n\n[... truncated, note body exceeds ${maxLen} characters ...]`
       : body;
 
   return {
@@ -149,7 +162,7 @@ export async function getNote(
  */
 export async function searchNotes(
   config: AppConfig,
-  query: string
+  query: string,
 ): Promise<SearchResult[]> {
   const escapedQuery = escapeForAppleScript(query);
 
@@ -159,7 +172,11 @@ export async function searchNotes(
       set matchingNotes to (every note whose body contains "${escapedQuery}")
       repeat with theNote in matchingNotes
         set theTitle to name of theNote
-        set theFolder to name of container of theNote
+        try
+          set theFolder to name of container of theNote
+        on error
+          set theFolder to "Unknown"
+        end try
         set theBody to body of theNote
         set output to output & theTitle & "${FIELD_SEP}" & theFolder & "${FIELD_SEP}" & theBody & "${RECORD_SEP}"
       end repeat
@@ -187,7 +204,12 @@ export async function searchNotes(
 
     let snippet: string | null = null;
     if (config.behavior.includeSnippetsInSearch) {
-      snippet = buildSnippet(body, query, config.behavior.snippetLength, config.behavior.caseSensitiveSearch);
+      snippet = buildSnippet(
+        body,
+        query,
+        config.behavior.snippetLength,
+        config.behavior.caseSensitiveSearch,
+      );
     }
 
     results.push({ title, folder: folder ?? "Unknown", snippet });
@@ -204,7 +226,7 @@ function buildSnippet(
   text: string,
   query: string,
   snippetLength: number,
-  caseSensitive: boolean
+  caseSensitive: boolean,
 ): string {
   const haystack = caseSensitive ? text : text.toLowerCase();
   const needle = caseSensitive ? query : query.toLowerCase();
@@ -212,7 +234,10 @@ function buildSnippet(
   const matchIndex = haystack.indexOf(needle);
   if (matchIndex === -1) {
     // Fallback: just return the start of the note
-    return text.slice(0, snippetLength).trim() + (text.length > snippetLength ? "..." : "");
+    return (
+      text.slice(0, snippetLength).trim() +
+      (text.length > snippetLength ? "..." : "")
+    );
   }
 
   const halfWindow = Math.floor(snippetLength / 2);
