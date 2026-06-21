@@ -1,0 +1,57 @@
+{
+  "//": "===========================================================================",
+  "//1": "NOTES MCP SERVER - CONFIGURATION FILE",
+  "//2": "Edit this file to control which folders and notes Claude is allowed to read.",
+  "//3": "No code changes needed - just update the values below and restart the server.",
+  "//4": "===========================================================================",
+
+  "access": {
+    "//mode_help": "Choose how access is restricted: 'all', 'allowlist', or 'denylist'",
+    "//mode_all": "  'all'        -> every folder and note is accessible (no restrictions)",
+    "//mode_allow": "  'allowlist'  -> ONLY folders/notes listed in 'allowedFolders' / 'allowedNotes' are accessible",
+    "//mode_deny": "  'denylist'   -> every folder/note is accessible EXCEPT those listed in 'blockedFolders' / 'blockedNotes'",
+    "mode": "all",
+
+    "//allowedFolders_help": "Used only when mode = 'allowlist'. Exact folder names as they appear in Notes app.",
+    "allowedFolders": [
+      "2026-06-JUNE"
+    ],
+
+    "//allowedNotes_help": "Used only when mode = 'allowlist'. Exact or partial note titles to allow.",
+    "allowedNotes": [],
+
+    "//blockedFolders_help": "Used only when mode = 'denylist'. Exact folder names to hide from Claude.",
+    "blockedFolders": [
+      "Private",
+      "Passwords"
+    ],
+
+    "//blockedNotes_help": "Used only when mode = 'denylist'. Exact or partial note titles to hide.",
+    "blockedNotes": [
+      "Bank Details",
+      "Secret"
+    ]
+  },
+
+  "limits": {
+    "//maxNotesPerListing_help": "Safety cap on how many notes can be returned in one 'list_notes' call.",
+    "maxNotesPerListing": 100,
+
+    "//maxSearchResults_help": "Safety cap on how many results 'search_notes' can return at once.",
+    "maxSearchResults": 50,
+
+    "//maxNoteBodyLength_help": "Truncate very long note bodies to this many characters (0 = no limit).",
+    "maxNoteBodyLength": 20000
+  },
+
+  "behavior": {
+    "//includeSnippetsInSearch_help": "If true, search results include a short preview of matching text, not just titles.",
+    "includeSnippetsInSearch": true,
+
+    "//snippetLength_help": "Length (characters) of the preview snippet shown around the matched keyword.",
+    "snippetLength": 200,
+
+    "//caseSensitiveSearch_help": "If true, keyword search distinguishes uppercase/lowercase.",
+    "caseSensitiveSearch": false
+  }
+}
