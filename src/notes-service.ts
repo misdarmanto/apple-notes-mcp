@@ -1,4 +1,9 @@
-import { runAppleScript, escapeForAppleScript } from "./applescript.js";
+import {
+  runAppleScript,
+  escapeForAppleScript,
+  appleScriptReadBodyFromTempFile,
+  runAppleScriptWithCleanup,
+} from "./applescript.js";
 import { AppConfig, isFolderAllowed, isNoteAllowed } from "./config.js";
 
 // A delimiter unlikely to appear naturally in note titles/folder names,
@@ -272,4 +277,259 @@ export async function listFolders(config: AppConfig): Promise<string[]> {
     .filter((f) => f.length > 0);
 
   return folderNames.filter((f) => isFolderAllowed(f, config));
+}
+
+/**
+ * Finds all notes whose title contains `titleQuery` (partial match).
+ * Used before destructive operations to detect ambiguous matches.
+ */
+export async function findNotesByTitle(
+  config: AppConfig,
+  titleQuery: string,
+): Promise<NoteDetail[]> {
+  const escapedQuery = escapeForAppleScript(titleQuery);
+
+  const script = `
+    tell application "Notes"
+      set output to ""
+      set matchingNotes to (every note whose name contains "${escapedQuery}")
+      repeat with theNote in matchingNotes
+        set theTitle to name of theNote
+        try
+          set theFolder to name of container of theNote
+        on error
+          set theFolder to "Unknown"
+        end try
+        set theDate to (modification date of theNote) as string
+        set theBody to body of theNote
+        set output to output & theTitle & "${FIELD_SEP}" & theFolder & "${FIELD_SEP}" & theDate & "${FIELD_SEP}" & theBody & "${RECORD_SEP}"
+      end repeat
+      return output
+    end tell`;
+
+  const raw = await runAppleScript(script);
+  if (!raw) return [];
+
+  const records = raw
+    .split(RECORD_SEP)
+    .map((r) => r.trim())
+    .filter((r) => r.length > 0);
+
+  const results: NoteDetail[] = [];
+  for (const record of records) {
+    const [title, folder, modifiedDate, ...bodyParts] = record.split(FIELD_SEP);
+    const body = bodyParts.join(FIELD_SEP);
+    if (!title) continue;
+    if (!isNoteAllowed(title, folder ?? null, config)) continue;
+
+    const maxLen = config.limits.maxNoteBodyLength;
+    const truncated =
+      maxLen > 0 && body.length > maxLen
+        ? body.slice(0, maxLen) +
+          `\n\n[... truncated, note body exceeds ${maxLen} characters ...]`
+        : body;
+
+    results.push({
+      title,
+      folder: folder ?? "Unknown",
+      modifiedDate: modifiedDate ?? "",
+      body: truncated,
+    });
+  }
+
+  return results;
+}
+
+export interface CreateNoteResult {
+  title: string;
+  folder: string;
+}
+
+/**
+ * Creates a new note in the specified folder (or the default Notes folder).
+ */
+export async function createNote(
+  config: AppConfig,
+  options: { title: string; body: string; folder?: string },
+): Promise<CreateNoteResult> {
+  const { title, body, folder } = options;
+
+  if (!title.trim()) {
+    throw new Error("Note title cannot be empty.");
+  }
+
+  if (folder && !isFolderAllowed(folder, config)) {
+    throw new Error(
+      `Folder "${folder}" is not accessible according to config.json access rules.`,
+    );
+  }
+
+  if (!isNoteAllowed(title, folder ?? null, config)) {
+    throw new Error(
+      `Creating a note titled "${title}" is not allowed by config.json access rules.`,
+    );
+  }
+
+  const escapedTitle = escapeForAppleScript(title);
+  const { setupLines, bodyVar, cleanupPaths } =
+    appleScriptReadBodyFromTempFile(body);
+
+  const script = folder
+    ? `
+      ${setupLines}
+      tell application "Notes"
+        tell folder "${escapeForAppleScript(folder)}"
+          make new note with properties {name:"${escapedTitle}", body:${bodyVar}}
+        end tell
+        return "${escapedTitle}${FIELD_SEP}${escapeForAppleScript(folder)}"
+      end tell`
+    : `
+      ${setupLines}
+      tell application "Notes"
+        set newNote to make new note with properties {name:"${escapedTitle}", body:${bodyVar}}
+        try
+          set noteFolder to name of container of newNote
+        on error
+          set noteFolder to "Notes"
+        end try
+        return "${escapedTitle}${FIELD_SEP}" & noteFolder
+      end tell`;
+
+  const raw = await runAppleScriptWithCleanup(script, cleanupPaths);
+  const [createdTitle, createdFolder] = raw.split(FIELD_SEP);
+
+  return {
+    title: createdTitle || title,
+    folder: createdFolder || folder || "Notes",
+  };
+}
+
+/**
+ * Updates an existing note identified by exact title.
+ */
+export async function updateNote(
+  config: AppConfig,
+  options: { exactTitle: string; newTitle?: string; newBody?: string },
+): Promise<NoteDetail> {
+  const { exactTitle, newTitle, newBody } = options;
+
+  if (!newTitle && newBody === undefined) {
+    throw new Error("At least one of newTitle or newBody must be provided.");
+  }
+
+  const existing = await findNotesByTitle(config, exactTitle);
+  const match = existing.find((n) => n.title === exactTitle);
+
+  if (!match) {
+    throw new Error(
+      `No accessible note found with exact title "${exactTitle}".`,
+    );
+  }
+
+  if (newTitle && !isNoteAllowed(newTitle, match.folder, config)) {
+    throw new Error(
+      `Renaming to "${newTitle}" is not allowed by config.json access rules.`,
+    );
+  }
+
+  const escapedExactTitle = escapeForAppleScript(exactTitle);
+  const cleanupPaths: string[] = [];
+  let bodySetup = "";
+  let titleAssignment = "";
+  let bodyAssignment = "";
+
+  if (newTitle) {
+    titleAssignment = `set name of theNote to "${escapeForAppleScript(newTitle)}"`;
+  }
+
+  if (newBody !== undefined) {
+    const {
+      setupLines,
+      bodyVar,
+      cleanupPaths: bodyPaths,
+    } = appleScriptReadBodyFromTempFile(newBody);
+    bodySetup = setupLines;
+    bodyAssignment = `set body of theNote to ${bodyVar}`;
+    cleanupPaths.push(...bodyPaths);
+  }
+
+  const script = `
+    ${bodySetup}
+    tell application "Notes"
+      set matchingNotes to (every note whose name is "${escapedExactTitle}")
+      if (count of matchingNotes) = 0 then
+        return ""
+      end if
+      set theNote to item 1 of matchingNotes
+      ${titleAssignment}
+      ${bodyAssignment}
+      set theTitle to name of theNote
+      try
+        set theFolder to name of container of theNote
+      on error
+        set theFolder to "Unknown"
+      end try
+      set theDate to (modification date of theNote) as string
+      set theBody to body of theNote
+      return theTitle & "${FIELD_SEP}" & theFolder & "${FIELD_SEP}" & theDate & "${FIELD_SEP}" & theBody
+    end tell`;
+
+  const raw = await runAppleScriptWithCleanup(script, cleanupPaths);
+  if (!raw) {
+    throw new Error(`Failed to update note "${exactTitle}".`);
+  }
+
+  const [title, folder, modifiedDate, ...bodyParts] = raw.split(FIELD_SEP);
+  const noteBody = bodyParts.join(FIELD_SEP);
+
+  return {
+    title,
+    folder: folder ?? "Unknown",
+    modifiedDate: modifiedDate ?? "",
+    body: noteBody,
+  };
+}
+
+/**
+ * Permanently deletes a note identified by exact title.
+ */
+export async function deleteNote(
+  config: AppConfig,
+  exactTitle: string,
+): Promise<{ title: string; folder: string }> {
+  const existing = await findNotesByTitle(config, exactTitle);
+  const match = existing.find((n) => n.title === exactTitle);
+
+  if (!match) {
+    throw new Error(
+      `No accessible note found with exact title "${exactTitle}".`,
+    );
+  }
+
+  const escapedExactTitle = escapeForAppleScript(exactTitle);
+
+  const script = `
+    tell application "Notes"
+      set matchingNotes to (every note whose name is "${escapedExactTitle}")
+      if (count of matchingNotes) = 0 then
+        return ""
+      end if
+      set theNote to item 1 of matchingNotes
+      try
+        set theFolder to name of container of theNote
+      on error
+        set theFolder to "Unknown"
+      end try
+      set theTitle to name of theNote
+      delete theNote
+      return theTitle & "${FIELD_SEP}" & theFolder
+    end tell`;
+
+  const raw = await runAppleScript(script);
+  if (!raw) {
+    throw new Error(`Failed to delete note "${exactTitle}".`);
+  }
+
+  const [title, folder] = raw.split(FIELD_SEP);
+  return { title: title || exactTitle, folder: folder ?? match.folder };
 }

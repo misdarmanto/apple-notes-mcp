@@ -7,7 +7,21 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 
 import { loadConfig } from "./config.js";
-import { listNotes, getNote, searchNotes, listFolders } from "./notes-service.js";
+import {
+  listNotes,
+  getNote,
+  searchNotes,
+  listFolders,
+  createNote,
+  updateNote,
+  deleteNote,
+  findNotesByTitle,
+} from "./notes-service.js";
+import {
+  createConfirmation,
+  consumeConfirmation,
+  type UpdateConfirmationPayload,
+} from "./confirmation.js";
 
 const server = new Server(
   {
@@ -18,7 +32,7 @@ const server = new Server(
     capabilities: {
       tools: {},
     },
-  }
+  },
 );
 
 server.setRequestHandler(ListToolsRequestSchema, async () => {
@@ -62,7 +76,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           properties: {
             title: {
               type: "string",
-              description: "The title of the note, or a substring of it, to search for.",
+              description:
+                "The title of the note, or a substring of it, to search for.",
             },
           },
           required: ["title"],
@@ -77,10 +92,97 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           properties: {
             query: {
               type: "string",
-              description: "Keyword or phrase to search for inside note bodies.",
+              description:
+                "Keyword or phrase to search for inside note bodies.",
             },
           },
           required: ["query"],
+        },
+      },
+      {
+        name: "create_note",
+        description:
+          "Create a new note in the macOS Notes app. Requires title and body. Optionally specify a folder name (must be accessible per config.json). This action executes immediately — no confirmation required.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            title: {
+              type: "string",
+              description: "Title for the new note.",
+            },
+            body: {
+              type: "string",
+              description: "Full body content for the new note.",
+            },
+            folder: {
+              type: "string",
+              description:
+                "Optional. Exact folder name to create the note in. If omitted, Notes uses its default folder.",
+            },
+          },
+          required: ["title", "body"],
+        },
+      },
+      {
+        name: "update_note",
+        description:
+          "Update an existing note's title and/or body. STRICT TWO-STEP FLOW: (1) First call WITHOUT confirmationToken to preview the change and receive a confirmationToken. (2) Ask the user explicitly whether they approve the update. (3) Only if the user clearly confirms, call again WITH confirmationToken AND userConfirmed=true. Never set userConfirmed=true without explicit user approval. Requires exact note title when confirming.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            title: {
+              type: "string",
+              description:
+                "Title of the note to update. Use exact title when confirming. Partial match is only used during the preview step to locate the note.",
+            },
+            newTitle: {
+              type: "string",
+              description:
+                "Optional new title. Omit to keep the current title.",
+            },
+            newBody: {
+              type: "string",
+              description:
+                "Optional new body content. Omit to keep the current body.",
+            },
+            confirmationToken: {
+              type: "string",
+              description:
+                "Token returned from the preview step. Required to execute the update.",
+            },
+            userConfirmed: {
+              type: "boolean",
+              description:
+                "Must be true to execute. Only set after the user explicitly confirms the update in chat.",
+            },
+          },
+          required: ["title"],
+        },
+      },
+      {
+        name: "delete_note",
+        description:
+          "Permanently delete a note from the macOS Notes app. STRICT TWO-STEP FLOW: (1) First call WITHOUT confirmationToken to preview which note will be deleted and receive a confirmationToken. (2) Ask the user explicitly whether they approve deletion. (3) Only if the user clearly confirms, call again WITH confirmationToken AND userConfirmed=true. Never set userConfirmed=true without explicit user approval. Deletion is irreversible.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            title: {
+              type: "string",
+              description:
+                "Title of the note to delete. Use exact title when confirming. Partial match is only used during the preview step to locate the note.",
+            },
+            confirmationToken: {
+              type: "string",
+              description:
+                "Token returned from the preview step. Required to execute the deletion.",
+            },
+            userConfirmed: {
+              type: "boolean",
+              description:
+                "Must be true to execute. Only set after the user explicitly confirms deletion in chat.",
+            },
+          },
+          required: ["title"],
         },
       },
     ],
@@ -121,7 +223,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
 
         const text = notes
-          .map((n) => `- "${n.title}" | Folder: ${n.folder} | Modified: ${n.modifiedDate}`)
+          .map(
+            (n) =>
+              `- "${n.title}" | Folder: ${n.folder} | Modified: ${n.modifiedDate}`,
+          )
           .join("\n");
 
         return { content: [{ type: "text", text }] };
@@ -131,7 +236,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const title = args?.title as string;
         if (!title) {
           return {
-            content: [{ type: "text", text: "Error: 'title' argument is required." }],
+            content: [
+              { type: "text", text: "Error: 'title' argument is required." },
+            ],
             isError: true,
           };
         }
@@ -157,7 +264,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const query = args?.query as string;
         if (!query) {
           return {
-            content: [{ type: "text", text: "Error: 'query' argument is required." }],
+            content: [
+              { type: "text", text: "Error: 'query' argument is required." },
+            ],
             isError: true,
           };
         }
@@ -183,6 +292,287 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           .join("\n");
 
         return { content: [{ type: "text", text }] };
+      }
+
+      case "create_note": {
+        const title = args?.title as string;
+        const body = args?.body as string;
+        const folder = args?.folder as string | undefined;
+
+        if (!title || body === undefined) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: "Error: 'title' and 'body' arguments are required.",
+              },
+            ],
+            isError: true,
+          };
+        }
+
+        const created = await createNote(config, { title, body, folder });
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Note created successfully.\nTitle: ${created.title}\nFolder: ${created.folder}`,
+            },
+          ],
+        };
+      }
+
+      case "update_note": {
+        const title = args?.title as string;
+        const newTitle = args?.newTitle as string | undefined;
+        const newBody = args?.newBody as string | undefined;
+        const confirmationToken = args?.confirmationToken as string | undefined;
+        const userConfirmed = args?.userConfirmed as boolean | undefined;
+
+        if (!title) {
+          return {
+            content: [
+              { type: "text", text: "Error: 'title' argument is required." },
+            ],
+            isError: true,
+          };
+        }
+
+        if (!confirmationToken) {
+          if (newTitle === undefined && newBody === undefined) {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: "Error: Provide at least one of 'newTitle' or 'newBody' for the preview step.",
+                },
+              ],
+              isError: true,
+            };
+          }
+
+          const matches = await findNotesByTitle(config, title);
+          if (matches.length === 0) {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: `No accessible note found matching title "${title}".`,
+                },
+              ],
+            };
+          }
+
+          if (matches.length > 1) {
+            const list = matches
+              .map((n) => `- "${n.title}" | Folder: ${n.folder}`)
+              .join("\n");
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: `Multiple notes match "${title}". Provide the exact title and call again:\n${list}`,
+                },
+              ],
+              isError: true,
+            };
+          }
+
+          const note = matches[0];
+          const token = createConfirmation({
+            action: "update",
+            exactTitle: note.title,
+            folder: note.folder,
+            newTitle,
+            newBody,
+          });
+
+          const changes: string[] = [];
+          if (newTitle !== undefined) {
+            changes.push(`New title: "${newTitle}"`);
+          }
+          if (newBody !== undefined) {
+            const preview =
+              newBody.length > 300 ? newBody.slice(0, 300) + "..." : newBody;
+            changes.push(`New body preview:\n${preview}`);
+          }
+
+          return {
+            content: [
+              {
+                type: "text",
+                text:
+                  `UPDATE PREVIEW — no changes made yet.\n\n` +
+                  `Current note:\n` +
+                  `- Title: "${note.title}"\n` +
+                  `- Folder: ${note.folder}\n` +
+                  `- Last modified: ${note.modifiedDate}\n\n` +
+                  `Proposed changes:\n${changes.join("\n\n")}\n\n` +
+                  `Ask the user to confirm this update. If they approve, call update_note again with:\n` +
+                  `- title: "${note.title}" (exact)\n` +
+                  `- confirmationToken: "${token}"\n` +
+                  `- userConfirmed: true`,
+              },
+            ],
+          };
+        }
+
+        if (!userConfirmed) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: "Update blocked: userConfirmed must be true. Ask the user explicitly, then retry only after they clearly approve.",
+              },
+            ],
+            isError: true,
+          };
+        }
+
+        const payload = consumeConfirmation(
+          confirmationToken,
+          "update",
+        ) as UpdateConfirmationPayload;
+
+        if (title !== payload.exactTitle) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Error: title must exactly match "${payload.exactTitle}" when confirming.`,
+              },
+            ],
+            isError: true,
+          };
+        }
+
+        const updated = await updateNote(config, {
+          exactTitle: payload.exactTitle,
+          newTitle: payload.newTitle,
+          newBody: payload.newBody,
+        });
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Note updated successfully.\nTitle: ${updated.title}\nFolder: ${updated.folder}\nLast Modified: ${updated.modifiedDate}\n\n---\n\n${updated.body}`,
+            },
+          ],
+        };
+      }
+
+      case "delete_note": {
+        const title = args?.title as string;
+        const confirmationToken = args?.confirmationToken as string | undefined;
+        const userConfirmed = args?.userConfirmed as boolean | undefined;
+
+        if (!title) {
+          return {
+            content: [
+              { type: "text", text: "Error: 'title' argument is required." },
+            ],
+            isError: true,
+          };
+        }
+
+        if (!confirmationToken) {
+          const matches = await findNotesByTitle(config, title);
+          if (matches.length === 0) {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: `No accessible note found matching title "${title}".`,
+                },
+              ],
+            };
+          }
+
+          if (matches.length > 1) {
+            const list = matches
+              .map((n) => `- "${n.title}" | Folder: ${n.folder}`)
+              .join("\n");
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: `Multiple notes match "${title}". Provide the exact title and call again:\n${list}`,
+                },
+              ],
+              isError: true,
+            };
+          }
+
+          const note = matches[0];
+          const token = createConfirmation({
+            action: "delete",
+            exactTitle: note.title,
+            folder: note.folder,
+          });
+
+          const bodyPreview =
+            note.body.length > 300
+              ? note.body.slice(0, 300) + "..."
+              : note.body;
+
+          return {
+            content: [
+              {
+                type: "text",
+                text:
+                  `DELETE PREVIEW — note NOT deleted yet.\n\n` +
+                  `Note to delete:\n` +
+                  `- Title: "${note.title}"\n` +
+                  `- Folder: ${note.folder}\n` +
+                  `- Last modified: ${note.modifiedDate}\n` +
+                  `- Body preview:\n${bodyPreview}\n\n` +
+                  `WARNING: Deletion is permanent and cannot be undone.\n\n` +
+                  `Ask the user to confirm deletion. If they approve, call delete_note again with:\n` +
+                  `- title: "${note.title}" (exact)\n` +
+                  `- confirmationToken: "${token}"\n` +
+                  `- userConfirmed: true`,
+              },
+            ],
+          };
+        }
+
+        if (!userConfirmed) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: "Deletion blocked: userConfirmed must be true. Ask the user explicitly, then retry only after they clearly approve.",
+              },
+            ],
+            isError: true,
+          };
+        }
+
+        const payload = consumeConfirmation(confirmationToken, "delete");
+
+        if (title !== payload.exactTitle) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Error: title must exactly match "${payload.exactTitle}" when confirming.`,
+              },
+            ],
+            isError: true,
+          };
+        }
+
+        const deleted = await deleteNote(config, payload.exactTitle);
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Note deleted permanently.\nTitle: "${deleted.title}"\nFolder: ${deleted.folder}`,
+            },
+          ],
+        };
       }
 
       default:
